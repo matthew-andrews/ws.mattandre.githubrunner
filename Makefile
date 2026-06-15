@@ -1,8 +1,11 @@
 .DEFAULT_GOAL := help
 
-CONFIG_DIR  := $(HOME)/.github-runner
-RUNNER_NAME := ws-mattandre-githubrunner
-DOCKER_IMG  := ghcr.io/actions/actions-runner:latest
+DOCKER_IMG := ghcr.io/actions/actions-runner:latest
+
+# owner/repo → runner-owner--repo (double-hyphen is safely reversible)
+cname = runner-$(subst /,--,$(1))
+# owner/repo → ~/.github-runner/owner--repo/_work
+cwork = $(HOME)/.github-runner/$(subst /,--,$(1))/_work
 
 help:
 	@echo "Usage: make <target>"
@@ -12,102 +15,142 @@ help:
 
 .PHONY: help
 
-## setup       — Pull runner image & create config directory
-setup:
-	mkdir -p $(CONFIG_DIR)
-	docker pull $(DOCKER_IMG)
-	@echo "Ready. Now run 'make run REPO=owner/repo'."
-
-.PHONY: setup
-
-## run         — Register & start runner for a repo. Usage: make run REPO=owner/repo LABELS=self-hosted,mac
-run:
+## register    — Register & start a runner for a repo. Usage: make register REPO=owner/repo
+register:
 	@set -e; \
 	if [ -z "$(REPO)" ]; then \
-		echo "ERROR: Usage: make run REPO=owner/repo [LABELS=self-hosted,mac]"; \
+		echo "ERROR: Usage: make run REPO=owner/repo"; \
 		exit 1; \
 	fi; \
 	LABELS_ARG=$${LABELS:-self-hosted}; \
+	CNAME="$(call cname,$(REPO))"; \
+	WORK="$(call cwork,$(REPO))"; \
 	echo "Getting registration token for $(REPO)..."; \
 	TOKEN=$$(gh api --method POST -H "Accept: application/vnd.github+json" \
 		"/repos/$(REPO)/actions/runners/registration-token" \
 		--jq '.token // empty'); \
 	if [ -z "$$TOKEN" ]; then \
-		echo "ERROR: Failed to get registration token. Check that:"; \
-		echo "      1. The repo exists: https://github.com/$(REPO)"; \
+		echo "ERROR: Failed to get registration token. Check:"; \
+		echo "      1. Repo exists: https://github.com/$(REPO)"; \
 		echo "      2. gh is authenticated (gh auth status)"; \
 		echo "      3. Token has repo scope"; \
 		exit 1; \
 	fi; \
-	echo "Starting runner container..."; \
-	docker rm -f github-runner 2>/dev/null || true; \
+	URL="https://github.com/$(REPO)"; \
+	mkdir -p "$$WORK"; \
+	echo "Starting container '$$CNAME'..."; \
+	docker rm -f "$$CNAME" 2>/dev/null || true; \
 	docker run -d \
-		--name github-runner \
+		--name "$$CNAME" \
 		--restart unless-stopped \
-		-e RUNNER_REPO_URL="https://github.com/$(REPO)" \
-		-e RUNNER_NAME="$(RUNNER_NAME)" \
-		-e RUNNER_TOKEN="$$TOKEN" \
-		-e RUNNER_LABELS="$$LABELS_ARG" \
+		-e URL="$$URL" \
+		-e TOKEN="$$TOKEN" \
+		-e NAME="$$CNAME" \
+		-e LABELS="$$LABELS_ARG" \
 		-v /var/run/docker.sock:/var/run/docker.sock \
-		-v $(CONFIG_DIR)/_work:/home/runner/_work \
-		$(DOCKER_IMG)
-	@echo "Runner registered for $(REPO). Check logs: make logs"
+		-v "$$WORK:/home/runner/_work" \
+		$(DOCKER_IMG) \
+		bash -c 'if [ ! -f .runner ]; then ./config.sh --url "$$URL" --token "$$TOKEN" --name "$$NAME" --labels "$$LABELS" --unattended; fi && exec ./bin/runsvc.sh'
+	@echo "Runner registered for $(REPO). Check: make logs REPO=$(REPO)"
 
-.PHONY: run
+.PHONY: register
 
-## start       — Start runner container if stopped
+## list        — Show all runners (REPO + STATUS)
+list:
+	@printf "%-50s %s\n" "REPO" "STATUS"; \
+	printf "%-50s %s\n" "----" "------"; \
+	docker ps -a -f name=runner- --format "{{.Names}} {{.Status}}" | \
+	while read -r CNAME STATUS; do \
+		REPO=$$(echo "$$CNAME" | sed 's/^runner-//;s/--/\//'); \
+		printf "%-50s %s\n" "$$REPO" "$$STATUS"; \
+	done
+
+.PHONY: list
+
+## start       — Start a stopped runner. Usage: make start REPO=owner/repo
 start:
-	docker start github-runner
+	@if [ -z "$(REPO)" ]; then \
+		echo "ERROR: Usage: make start REPO=owner/repo"; \
+		exit 1; \
+	fi
+	docker start "$(call cname,$(REPO))"
 
 .PHONY: start
 
-## stop        — Stop runner container (laptop mode)
+## stop        — Stop a runner. Usage: make stop REPO=owner/repo
 stop:
-	docker stop github-runner
+	@if [ -z "$(REPO)" ]; then \
+		echo "ERROR: Usage: make stop REPO=owner/repo"; \
+		exit 1; \
+	fi
+	docker stop "$(call cname,$(REPO))"
 
 .PHONY: stop
 
-## restart     — Stop then start
-restart: stop start
+## start-all   — Start all stopped runners
+start-all:
+	@CONTAINERS=$$(docker ps -aq -f name=runner- -f status=exited); \
+	if [ -n "$$CONTAINERS" ]; then \
+		docker start $$CONTAINERS; \
+	fi
 
-.PHONY: restart
+.PHONY: start-all
 
-## status      — Show runner container status
-status:
-	docker ps -f name=github-runner --format "{{.Names}}: {{.Status}}"
+## stop-all    — Stop all running runners
+stop-all:
+	@CONTAINERS=$$(docker ps -q -f name=runner-); \
+	if [ -n "$$CONTAINERS" ]; then \
+		docker stop $$CONTAINERS; \
+	fi
 
-.PHONY: status
+.PHONY: stop-all
 
-## logs        — Tail runner logs
+## logs        — Tail runner logs. Usage: make logs REPO=owner/repo
 logs:
-	docker logs -f github-runner
+	@if [ -z "$(REPO)" ]; then \
+		echo "ERROR: Usage: make logs REPO=owner/repo"; \
+		exit 1; \
+	fi
+	docker logs -f "$(call cname,$(REPO))"
 
 .PHONY: logs
 
-## unregister  — Remove runner from GitHub and delete container. Usage: make unregister REPO=owner/repo
+## unregister  — Remove from GitHub & delete container. Usage: make unregister REPO=owner/repo
 unregister:
-	@if [ -z "$(REPO)" ]; then \
+	@set -e; \
+	if [ -z "$(REPO)" ]; then \
 		echo "ERROR: Usage: make unregister REPO=owner/repo"; \
 		exit 1; \
-	fi
-	@echo "Looking up runner ID for $(RUNNER_NAME) in $(REPO)..."
+	fi; \
+	CNAME="$(call cname,$(REPO))"; \
+	echo "Looking up runner '$$CNAME' in $(REPO)..."; \
 	RUNNER_ID=$$(gh api -H "Accept: application/vnd.github+json" \
 		"/repos/$(REPO)/actions/runners" \
-		--jq '.runners[] | select(.name == "$(RUNNER_NAME)") | .id' 2>/dev/null); \
+		--jq '.runners[] | select(.name == "$(call cname,$(REPO))") | .id' 2>/dev/null); \
 	if [ -n "$$RUNNER_ID" ]; then \
-		echo "Removing runner #$$RUNNER_ID..."; \
+		echo "Deleting runner #$$RUNNER_ID..."; \
 		gh api --method DELETE -H "Accept: application/vnd.github+json" \
-			"/repos/$(REPO)/actions/runners/$$RUNNER_ID" > /dev/null; \
+			"/repos/$(REPO)/actions/runners/$$RUNNER_ID" > /dev/null || true; \
+		echo "Runner removed from GitHub."; \
 	else \
-		echo "No runner named $(RUNNER_NAME) found in $(REPO)."; \
+		echo "No runner named '$(call cname,$(REPO))' found on GitHub—skipping."; \
 	fi; \
-	docker rm -f github-runner 2>/dev/null || true; \
-	@echo "Runner removed."
+	docker rm -f "$$CNAME" 2>/dev/null || true; \
+	echo "Container removed."
 
 .PHONY: unregister
 
-## uninstall   — Stop & remove container (config kept in ~/.github-runner)
+## uninstall   — Remove ALL runner containers (keeps ~/.github-runner/)
 uninstall:
-	docker stop github-runner 2>/dev/null || true
-	docker rm github-runner 2>/dev/null || true
-	@echo "Container removed. Config retained in $(CONFIG_DIR)."
+	@echo "Removing all runner containers..."; \
+	CONTAINERS=$$(docker ps -aq -f name=runner-); \
+	if [ -n "$$CONTAINERS" ]; then \
+		docker stop $$CONTAINERS 2>/dev/null || true; \
+		docker rm $$CONTAINERS 2>/dev/null || true; \
+		echo "All runner containers removed."; \
+	else \
+		echo "No runner containers found."; \
+	fi; \
+	echo "Work dirs retained in ~/.github-runner/."
+
+.PHONY: uninstall
