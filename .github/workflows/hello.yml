@@ -1,0 +1,9 @@
+name: Hello Runner
+on: push
+jobs:
+  hello:
+    runs-on: self-hosted
+    steps:
+      - run: echo "Hello from self-hosted runner!"
+      - run: whoami
+      - run: uname -a
