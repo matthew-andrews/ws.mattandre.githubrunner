@@ -15,13 +15,6 @@ help:
 
 .PHONY: help
 
-## setup       — Pull the runner image
-setup:
-	docker pull $(DOCKER_IMG)
-	@echo "Ready. Now run 'make register REPO=owner/repo'."
-
-.PHONY: setup
-
 ## register    — Register & start a runner for a repo. Usage: make register REPO=owner/repo
 register:
 	@set -e; \

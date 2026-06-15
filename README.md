@@ -20,8 +20,7 @@ from a single Makefile.
 # 1. Start Colima (if not already running)
 colima start
 
-# 2. Set up the runner for a repo
-make setup
+# 2. Register a runner for a repo
 make register REPO=matthew-andrews/my-project
 
 # 3. Add another repo (different container, same Makefile)
@@ -35,7 +34,6 @@ make list
 
 | Target | Usage | Description |
 |---|---|---|
-| `setup` | `make setup` | Pull the runner image |
 | `register` | `make register REPO=owner/repo` | Register & start a runner for a repo |
 | `list` | `make list` | Show all repos and their runner status |
 | `logs` | `make logs REPO=owner/repo` | Tail logs for a specific runner |
