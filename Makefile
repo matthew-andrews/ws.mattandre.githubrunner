@@ -22,29 +22,35 @@ setup:
 
 ## run         — Register & start runner for a repo. Usage: make run REPO=owner/repo LABELS=self-hosted,mac
 run:
-	@if [ -z "$(REPO)" ]; then \
+	@set -e; \
+	if [ -z "$(REPO)" ]; then \
 		echo "ERROR: Usage: make run REPO=owner/repo [LABELS=self-hosted,mac]"; \
 		exit 1; \
-	fi
+	fi; \
 	LABELS_ARG=$${LABELS:-self-hosted}; \
 	echo "Getting registration token for $(REPO)..."; \
-	TOKEN=$$(gh api -H "Accept: application/vnd.github+json" \
+	TOKEN=$$(gh api --method POST -H "Accept: application/vnd.github+json" \
 		"/repos/$(REPO)/actions/runners/registration-token" \
-		--jq '.token'); \
+		--jq '.token // empty'); \
+	if [ -z "$$TOKEN" ]; then \
+		echo "ERROR: Failed to get registration token. Check that:"; \
+		echo "      1. The repo exists: https://github.com/$(REPO)"; \
+		echo "      2. gh is authenticated (gh auth status)"; \
+		echo "      3. Token has repo scope"; \
+		exit 1; \
+	fi; \
 	echo "Starting runner container..."; \
 	docker rm -f github-runner 2>/dev/null || true; \
 	docker run -d \
 		--name github-runner \
 		--restart unless-stopped \
-		-e REPO_URL="https://github.com/$(REPO)" \
+		-e RUNNER_REPO_URL="https://github.com/$(REPO)" \
 		-e RUNNER_NAME="$(RUNNER_NAME)" \
 		-e RUNNER_TOKEN="$$TOKEN" \
 		-e RUNNER_LABELS="$$LABELS_ARG" \
-		-e EPHEMERAL=0 \
 		-v /var/run/docker.sock:/var/run/docker.sock \
-		-v $(CONFIG_DIR):/home/runner/actions-runner \
-		$(DOCKER_IMG) \
-		./bin/runsvc.sh
+		-v $(CONFIG_DIR)/_work:/home/runner/_work \
+		$(DOCKER_IMG)
 	@echo "Runner registered for $(REPO). Check logs: make logs"
 
 .PHONY: run
@@ -87,11 +93,13 @@ unregister:
 	@echo "Looking up runner ID for $(RUNNER_NAME) in $(REPO)..."
 	RUNNER_ID=$$(gh api -H "Accept: application/vnd.github+json" \
 		"/repos/$(REPO)/actions/runners" \
-		--jq '.runners[] | select(.name == "$(RUNNER_NAME)") | .id'); \
+		--jq '.runners[] | select(.name == "$(RUNNER_NAME)") | .id' 2>/dev/null); \
 	if [ -n "$$RUNNER_ID" ]; then \
 		echo "Removing runner #$$RUNNER_ID..."; \
 		gh api --method DELETE -H "Accept: application/vnd.github+json" \
-			"/repos/$(REPO)/actions/runners/$$RUNNER_ID"; \
+			"/repos/$(REPO)/actions/runners/$$RUNNER_ID" > /dev/null; \
+	else \
+		echo "No runner named $(RUNNER_NAME) found in $(REPO)."; \
 	fi; \
 	docker rm -f github-runner 2>/dev/null || true; \
 	@echo "Runner removed."
